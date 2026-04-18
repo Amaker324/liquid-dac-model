@@ -1,0 +1,87 @@
+# =========================
+# OS / system files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# MATLAB
+# =========================
+# Backup / autosave files (this is what you asked for)
+*~
+*.m~
+*.asv
+
+# Simulink / MATLAB artifacts
+slprj/
+*.slxc
+*.mdl.r
+*.slx.r
+*.mex*
+
+# Figures
+*.fig
+
+# =========================
+# Python
+# =========================
+__pycache__/
+*.py[cod]
+*.pyd
+
+# Virtual environments
+env/
+venv/
+.venv/
+
+# Build / distribution
+dist/
+build/
+*.egg-info/
+
+# =========================
+# Jupyter / notebooks
+# =========================
+.ipynb_checkpoints/
+
+# =========================
+# Data & simulation outputs
+# (DO NOT track generated DAC results)
+# =========================
+results/
+outputs/
+data/processed/
+data/generated/
+
+# Optional large data files (adjust if needed)
+*.csv
+*.h5
+*.hdf5
+*.nc
+*.mat
+
+# Keep folder structure
+!data/input/.gitkeep
+!results/.gitkeep
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# Editors / IDEs
+# =========================
+.vscode/
+.idea/
+
+# Swap / temp files
+*.swp
+*.swo
+*.tmp
+
+# =========================
+# Environment / secrets
+# =========================
+.env
+.env.*
