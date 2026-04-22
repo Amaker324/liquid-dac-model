@@ -14,17 +14,17 @@ etc.
 #%% Library time
 import numpy as np
 import matplotlib.pyplot as plt
-
+from scipy.optimize import brentq
 
 #%%Constants
 R=8.314 
 MW_CO2=44.01e-3 #kg/mol
-H=29.4e5 #Henries constant Pam^3/mol CO2 in water. THIS NEEDS UPDATING
+#H=29.4e5 #Henries constant Pam^3/mol CO2 in water. THIS NEEDS UPDATING
 #kL=2e-4 #NOT ACCURATE
 rho_l = 1000 #density of water just keeping it constant. Possible improvement here.
 g = 9.81 #Gravity 
 
-E=500 #VERY INACCURATEW
+#E=500 #VERY INACCURATEW
 #%% Packing Material
 a=250 #packing area m^2/m^3
 epsi = 0.9 #Packing void fraction
@@ -36,8 +36,8 @@ T_amb=298 #25 degrees C may change this to accept only C no Kelvin
 
 
 #%% Specifications <--- Change these 
-L_col=40 # in meters length of column
-D_col= 10 # in meters, Diamter of column
+L_col=7 # in meters length of column
+D_col= 225 # in meters, Diamter of column
 
 N=200 #number of discrete spots in the column
 dz=L_col/N
@@ -56,7 +56,7 @@ u_l=0.01 #m/s Liquid velocity
 
 G_mol=(P_amb/(R*T_amb))*u_g*Xs_col
 
-
+C_OH=2000 
 
 
 
@@ -68,7 +68,10 @@ G_mol=(P_amb/(R*T_amb))*u_g*Xs_col
 
 
 def calc_properties(T_K):
-    """Calculates temperature-dependent Water Properties like density viscosity and surface tension."""
+    """
+    Calculates temperature-dependent Water Properties like density viscosity and surface tension.
+    Units of mu Pa*s and sigma is N/m
+    """
     
         
     #viscosity in Pa*s
@@ -80,6 +83,9 @@ def calc_properties(T_K):
 
 def calc_DL(T_K, mu_Pas):
     """Calculates diffusivity of CO2 in liquid using Wilke-Chang (Eq S4)."""
+   
+    # Error Checked looks good
+    
     Va = 34.0  #molar volume of CO2 at boiling point
     mu_cP= mu_Pas * 1000 #unit conversion
     # Result in cm^2/s from the correlation formula
@@ -92,9 +98,10 @@ def calc_DL(T_K, mu_Pas):
 
 def calc_aw(u_l, T_K):
     """Calculates wetted area using Onda correlation (Eq S9)."""
+    # Error checked this should be good
     mu, sigma = calc_properties(T_K)
     
-    
+    # careful a here is packing specific surface area
     Re_L = (u_l * rho_l) / (mu * a)
     Fr_L = (u_l**2 * a) / g
     We_L = (u_l**2 * rho_l) / (sigma * a)
@@ -124,10 +131,128 @@ def calc_kL(T_K, u_l):
     
     return term1 * term2 * term3 * term4
 
+def calc_kr(T=T_amb,C_i=C_OH):
+    """
+    Calculating rate constant. Note: T must be in range 0-50 celcius
+
+    """
+    if (0+273.15)<T<(40+273.15):
+        try: 
+            kr=(10**(13.635 - 2895/T))/1000
+            
+        except: print("Error in rate constant Calculation for 0<T<40")
+    elif (20+273.15)<T<(50+273.15):
+        try:
+            BC=3.3968e-4*(T**2)-2.1215e-1*T+33.506
+            
+            k2inf=3.27869e13*np.exp(-54971/(R*T))
+            
+            kr=k2inf*np.exp(BC*C_i/1000)/1000
+        
+        except: print("Error in rate constant Calculation for 20<T<50")
+    else:
+        kr=1e-12
+   
+    return kr
+
+def solve_E(T_K,u=u_l,C_OH=C_OH):
+    """
+    Solves for E numerically.
+    Note also converts C_OH to mol/L
+    """
+    C=C_OH/1000
+    if C_OH <=0: return 1.0
+    mu,_=calc_properties(T_K)
+    DL=calc_DL(T_K, mu)
+    
+    k2=calc_kr(T_K,C_OH)
+    #print(k2)
+    kL=calc_kL(T_K, u)
+    M=(DL*k2*C_OH/1000)/(kL**2)
+    
+    def calc_DB(T=T_K,mu=mu,C_OH=C):
+        #this function is good. Err checked.
+        
+        if T<273.15: return 0
+        if (1+273.15)<=T<=(25+273.15):
+            K1=-7.56e-4
+            K2=4.94e-6
+            K3=-7.77e-9
+            K4=1.1e-5
+            K5=4.93e-6
+            K6=-1.18e-6
+            K7=-1.07
+            DB=K1+K2*T+K3*(T**2)+K4*np.sqrt(T)+K5+K6*(C_OH**(3/2))+K7*np.sqrt(C_OH)/(T**2)
+            return DB/(100**2)
+        else:
+            kb=1.38e-23 #boltzmann J/K
+            d2=0.22e-9
+            return kb*T/(3*np.pi*mu*d2)
+        
+    #end
+    
+    DB=calc_DB()
+    
+    Ei=1 + DB*C/(2*DL*kL)
+    
+    def E_calc(E):
+        num=np.sqrt(M*(Ei-E)/(Ei-1))
+        denom=max(np.tanh(num),1e-12)
+        return num/denom - E
+    #end
+    try:
+        return brentq(E_calc,1,Ei)
+    except: return max(1, min(np.sqrt(M),Ei))
+    
+
+
+
+
+
+
+def calc_DB(T=T_amb,C_OH=C_OH):
+    #this function is good. Err checked.
+    mu,_=calc_properties(T)
+    if T<273.15: return 0
+    if (1+273.15)<=T<=(25+273.15):
+        K1=-7.56e-4
+        K2=4.94e-6
+        K3=-7.77e-9
+        K4=1.1e-5
+        K5=4.93e-6
+        K6=-1.18e-6
+        K7=-1.07
+        DB=K1+K2*T+K3*(T**2)+K4*np.sqrt(T)+K5+K6*(C_OH**(3/2))+K7*np.sqrt(C_OH)/(T**2)
+        return DB/(100**2)
+    else:
+        kb=1.38e-23 #boltzmann J/K
+        d2=0.22e-9
+        return kb*T/(3*np.pi*mu*d2)
+    # THIS IS WRONGGGGGG
+def get_Henry_Constant(T_K, C_OH):
+    # 1. Pure water Henry (example correlation)
+    # This represents H0 in Table S1
+    H0 = np.exp( (-19.95e3/R)*(1/T_K - 1/298.15) ) 
+    
+    # 2. Salt effect (Equation 16)
+    # sum(h_i * c_i) for KOH (K+ and OH-)
+    # h_total = (h_K + h_G) + (h_OH + h_G)
+    h_K = 0.0922; h_OH = 0.0839; h_G = -0.019
+    
+    # Ks is the "salt-effect parameter" from Table S1
+    Ks = 1#(h_K + h_G) + (h_OH + h_G) 
+    
+    # Apply I (ionic strength) adjustment
+    # log10(H/H0) = Ks * C_OH (assuming C_OH is in mol/L)
+    H = H0 * 10**(Ks/2* (C_OH/1000)) # Convert your C_OH to mol/L if it's in mol/m3
+    return H*101.325 # atm L/mol to Pa m^3/mol
+
 #%% Model. Eventually make this into a function/class okay?
 
 z = np.linspace(0, L_col, N+1)
 y_CO2 = np.zeros(N+1)
+C_Hydroxide=np.zeros(N+1)
+C_Hydroxide[0]=C_OH
 y_CO2[0] = y_in
 
 capture_rate = np.zeros(N)
@@ -136,26 +261,33 @@ for i in range(N):
     #get the partial Pressure of CO2
     p_CO2=y_CO2[i]*P_amb
     #Get the interfacial concentration
+    
+    H=get_Henry_Constant(T_amb, C_Hydroxide[i])
+    print(H)
     c_i=p_CO2/H #mol/m^3
     
     #Get the flux
     kL=calc_kL(T_amb, u_l)
-    J=kL*c_i*E #very inaaccurate changeeeee
+    E=solve_E(T_amb,C_OH=C_Hydroxide[i])
+
+    J=kL*c_i*E 
     #interfacial area
-    A_i=a*dv
+    A_i=calc_aw(u_l, T_amb)*dv
     #CO2 absored in the dv
     mol_absorbed=J*A_i #mol/s
     capture_rate[i]=mol_absorbed
     
     #Next gas phase
     y_CO2[i+1]= y_CO2[i] - mol_absorbed/G_mol
+    C_Hydroxide[i+1]=C_Hydroxide[i]-2*mol_absorbed/(u_l*Xs_col*dz)
     
 total_capture=np.sum(capture_rate)
 removal_fraction = (y_in - y_CO2[-1]) / y_in
     
     
 kg_per_hr = total_capture * 44.01e-3 * 3600
-
+ton_per_day=kg_per_hr/1000
+print(ton_per_day)
 print(f"Outlet CO2 mole fraction: {y_CO2[-1]:.4f}")
 print(f"Total CO2 capture rate: {total_capture:.4f} mol/s")
 print(f"Removed: {removal_fraction*100:.2f}%")
