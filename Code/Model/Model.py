@@ -155,12 +155,11 @@ def calc_kr(T=T_amb,C_i=C_OH):
    
     return kr
 
-def solve_E(T_K,u=u_l,C_OH=C_OH):
+def solve_E(T_K,u=u_l,C_OH=C_OH,C_i=C_OH):
     """
     Solves for E numerically.
     Note also converts C_OH to mol/L
     """
-    C=C_OH/1000
     if C_OH <=0: return 1.0
     mu,_=calc_properties(T_K)
     DL=calc_DL(T_K, mu)
@@ -168,9 +167,9 @@ def solve_E(T_K,u=u_l,C_OH=C_OH):
     k2=calc_kr(T_K,C_OH)
     #print(k2)
     kL=calc_kL(T_K, u)
-    M=(DL*k2*C_OH/1000)/(kL**2)
-    
-    def calc_DB(T=T_K,mu=mu,C_OH=C):
+    M=(DL*k2*C_OH)/(kL**2)
+   
+    def calc_DB(T=T_K,mu=mu,C_OH=C_OH/1000):
         #this function is good. Err checked.
         
         if T<273.15: return 0
@@ -193,7 +192,7 @@ def solve_E(T_K,u=u_l,C_OH=C_OH):
     
     DB=calc_DB()
     
-    Ei=1 + DB*C/(2*DL*kL)
+    Ei=1 + DB*C_OH/(2*DL*C_i)
     
     def E_calc(E):
         num=np.sqrt(M*(Ei-E)/(Ei-1))
@@ -228,23 +227,28 @@ def calc_DB(T=T_amb,C_OH=C_OH):
         kb=1.38e-23 #boltzmann J/K
         d2=0.22e-9
         return kb*T/(3*np.pi*mu*d2)
-    # THIS IS WRONGGGGGG
-def get_Henry_Constant(T_K, C_OH):
+
+def get_Henry_Constant(T_K, C_OH,C_KCO3,C_K=C_OH):
     # 1. Pure water Henry (example correlation)
     # This represents H0 in Table S1
-    H0 = np.exp( (-19.95e3/R)*(1/T_K - 1/298.15) ) 
+    H0 = (1/3.4e-2) * np.exp( (19.95e3/R)*(1/T_K - 1/298.15) ) 
+    
+    C_K=C_K/1000; C_OH=C_OH/1000; C_KCO3=C_KCO3/1000
     
     # 2. Salt effect (Equation 16)
     # sum(h_i * c_i) for KOH (K+ and OH-)
     # h_total = (h_K + h_G) + (h_OH + h_G)
-    h_K = 0.0922; h_OH = 0.0839; h_G = -0.019
+    h_K = 0.074; h_OH = 0.066; h_G = -0.019; h_carb=0.021
+    h_KOH=h_K+h_OH+h_G
+    h_CO3=h_K+h_G+h_carb
+    I_KOH=(1/2)*(C_K+C_OH)
+    I_CO3=(1/2)*(C_K+C_KCO3)
     
-    # Ks is the "salt-effect parameter" from Table S1
-    Ks = 1#(h_K + h_G) + (h_OH + h_G) 
+    
     
     # Apply I (ionic strength) adjustment
     # log10(H/H0) = Ks * C_OH (assuming C_OH is in mol/L)
-    H = H0 * 10**(Ks/2* (C_OH/1000)) # Convert your C_OH to mol/L if it's in mol/m3
+    H = H0 * 10**(h_CO3*I_CO3+h_KOH*I_KOH) # Convert your C_OH to mol/L if it's in mol/m3
     return H*101.325 # atm L/mol to Pa m^3/mol
 
 #%% Model. Eventually make this into a function/class okay?
@@ -262,17 +266,17 @@ for i in range(N):
     p_CO2=y_CO2[i]*P_amb
     #Get the interfacial concentration
     
-    H=get_Henry_Constant(T_amb, C_Hydroxide[i])
-    print(H)
+    H=get_Henry_Constant(T_amb, C_Hydroxide[i], C_Hydroxide[i]-C_OH)
+    
     c_i=p_CO2/H #mol/m^3
     
     #Get the flux
     kL=calc_kL(T_amb, u_l)
-    E=solve_E(T_amb,C_OH=C_Hydroxide[i])
-
+    E=solve_E(T_amb,C_OH=C_Hydroxide[i],C_i=c_i)
+    
     J=kL*c_i*E 
     #interfacial area
-    A_i=calc_aw(u_l, T_amb)*dv
+    A_i=dv*0.8*a #calc_aw(u_l, T_amb)*dv
     #CO2 absored in the dv
     mol_absorbed=J*A_i #mol/s
     capture_rate[i]=mol_absorbed
@@ -283,8 +287,7 @@ for i in range(N):
     
 total_capture=np.sum(capture_rate)
 removal_fraction = (y_in - y_CO2[-1]) / y_in
-    
-    
+
 kg_per_hr = total_capture * 44.01e-3 * 3600
 ton_per_day=kg_per_hr/1000
 print(ton_per_day)
