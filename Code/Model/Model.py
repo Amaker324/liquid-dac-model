@@ -16,6 +16,20 @@ import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import brentq
 
+#%% THESE ARE DESIGN PARAMETERS note a lot of these are based on the numbers from the paper
+L_col=7 # in meters length of column
+D_col= 225 # in meters, Diamter of column
+
+
+u_g=1.48 #m/s this is gas velocity. want turbulent flow but too high means its inefficeint
+y_in=0.0004 #mol frac of CO2
+
+u_l=0.005 #m/s Liquid velocity
+
+
+
+C_OH=1100
+
 #%%Constants
 R=8.314 
 MW_CO2=44.01e-3 #kg/mol
@@ -26,7 +40,7 @@ g = 9.81 #Gravity
 
 #E=500 #VERY INACCURATEW
 #%% Packing Material
-a=250 #packing area m^2/m^3
+a=210 #packing area m^2/m^3
 epsi = 0.9 #Packing void fraction
 #%% Process Conditions
 
@@ -36,8 +50,6 @@ T_amb=298 #25 degrees C may change this to accept only C no Kelvin
 
 
 #%% Specifications <--- Change these 
-L_col=7 # in meters length of column
-D_col= 225 # in meters, Diamter of column
 
 N=200 #number of discrete spots in the column
 dz=L_col/N
@@ -49,15 +61,8 @@ dv=dz*Xs_col
 V_col=Xs_col*L_col
 #%%% Stream Specifications
 
-u_g=2 #m/s this is gas velocity. want turbulent flow but too high means its inefficeint
-y_in=0.0004 #mol frac of CO2
-
-u_l=0.01 #m/s Liquid velocity
 
 G_mol=(P_amb/(R*T_amb))*u_g*Xs_col
-
-C_OH=2000 
-
 
 
 
@@ -251,60 +256,172 @@ def get_Henry_Constant(T_K, C_OH,C_KCO3,C_K=C_OH):
     H = H0 * 10**(h_CO3*I_CO3+h_KOH*I_KOH) # Convert your C_OH to mol/L if it's in mol/m3
     return H*101.325 # atm L/mol to Pa m^3/mol
 
-#%% Model. Eventually make this into a function/class okay?
+#%% Model.
+from scipy.integrate import solve_bvp
 
-z = np.linspace(0, L_col, N+1)
-y_CO2 = np.zeros(N+1)
-C_Hydroxide=np.zeros(N+1)
-C_Hydroxide[0]=C_OH
-y_CO2[0] = y_in
+def odes(z,y):
+    """
+    y[0] is y_CO2 
+    y[1] is C_OH concentration mol/m^3
+    """
+    y_CO2_val=y[0]
+    C_OH_val=y[1]
+    dy_dz=np.zeros_like(y)
+    
+    for i in range(len(z)):
+        p_CO2=y_CO2_val[i]*P_amb
+        C_KCO3=(C_OH-C_OH_val[i])/2 #2 of OH react to make KCO3
+        H=get_Henry_Constant(T_amb, C_OH_val[i], C_KCO3)
+        C_i=p_CO2/H
+        
+        kL=calc_kL(T_amb, u_l)
+        
+        E=solve_E(T_amb,C_OH=max(C_OH,1e-9), C_i=max(C_i,1e-9))
+        flux=kL*C_i*E
+        
+        #ODEs
+        dy_dz[0,i]= -(flux*a*Xs_col)/G_mol
+        #liquid this one is confusing so trust????
+        dy_dz[1,i]=2*flux*a/u_l
+        
+    return dy_dz
 
-capture_rate = np.zeros(N)
 
-for i in range(N):
-    #get the partial Pressure of CO2
-    p_CO2=y_CO2[i]*P_amb
-    #Get the interfacial concentration
+def boundary_cond(ya,yb):
+    """
     
-    H=get_Henry_Constant(T_amb, C_Hydroxide[i], C_Hydroxide[i]-C_OH)
-    
-    c_i=p_CO2/H #mol/m^3
-    
-    #Get the flux
-    kL=calc_kL(T_amb, u_l)
-    E=solve_E(T_amb,C_OH=C_Hydroxide[i],C_i=c_i)
-    
-    J=kL*c_i*E 
-    #interfacial area
-    A_i=dv*0.8*a #calc_aw(u_l, T_amb)*dv
-    #CO2 absored in the dv
-    mol_absorbed=J*A_i #mol/s
-    capture_rate[i]=mol_absorbed
-    
-    #Next gas phase
-    y_CO2[i+1]= y_CO2[i] - mol_absorbed/G_mol
-    C_Hydroxide[i+1]=C_Hydroxide[i]-2*mol_absorbed/(u_l*Xs_col*dz)
-    
-total_capture=np.sum(capture_rate)
-removal_fraction = (y_in - y_CO2[-1]) / y_in
 
-kg_per_hr = total_capture * 44.01e-3 * 3600
-ton_per_day=kg_per_hr/1000
-print(ton_per_day)
-print(f"Outlet CO2 mole fraction: {y_CO2[-1]:.4f}")
-print(f"Total CO2 capture rate: {total_capture:.4f} mol/s")
-print(f"Removed: {removal_fraction*100:.2f}%")
-print(f"Removal fraction: {removal_fraction:.3f}")
+    Parameters
+    ----------
+    ya : float
+        values at z=0 ie bottom of column pure air
+    yb : float
+        values at z=L ie top of column pure C_OH
 
-print(f"Amount removed in kg/hr: {kg_per_hr:.3f}")
+    Returns
+    -------
+    RESIDUALS
 
-#%% Check Results
-plt.plot(z, y_CO2)
-plt.xlabel("Column height (m)")
-plt.ylabel("CO2 mole fraction")
-plt.title("CO2 Absorption in KOH Column (Version 1)")
-plt.grid()
-plt.show()
+    """
+    res1=ya[0]-y_in
+    res2=yb[1]-C_OH
+    return np.array([res1,res2])
+
+
+
+
+#Solver stuff
+
+Z_vals=np.linspace(0,L_col,50)
+y_guess=np.zeros((2,Z_vals.size))
+y_guess[0,:]=np.linspace(y_in, y_in*0.1, Z_vals.size)
+y_guess[1,:]=np.linspace(C_OH*0.8,C_OH,Z_vals.size)
+
+sol=solve_bvp(odes, boundary_cond, Z_vals, y_guess)
+
+if sol.success:
+    z_final = np.linspace(0, L_col, 100)
+    y_final = sol.sol(z_final)
+    
+    # 1. Grab the outlet concentrations
+    y_CO2_outlet = y_final[0, -1]  # Gas mole fraction at z = L (Top)
+    C_OH_outlet = y_final[1, 0]    # Liquid concentration at z = 0 (Bottom)
+    
+    # 2. Calculate Total Absorption (Molar)
+    # Total CO2 absorbed = Gas Flow Rate * (Inlet mole fraction - Outlet mole fraction)
+    total_mol_s = G_mol * (y_in - y_CO2_outlet)
+    
+    # 3. Convert to Mass
+    total_kg_hr = total_mol_s * MW_CO2 * 3600
+    total_ton_day = (total_kg_hr * 24) / 1000
+    
+
+    # 4. Removal Efficiency
+    efficiency = (y_in - y_CO2_outlet) / y_in * 100
+
+    # 5. Power
+    total_power_gen=total_mol_s*(-95.8)/1000
+    print("--- Absorption Results ---")
+    print(f"Outlet CO2: {y_CO2_outlet:.6f} mol/mol")
+    print(f"Outlet KOH: {C_OH_outlet:.2f} mol/m^3")
+    print(f"Capture Rate: {total_mol_s:.4f} mol/s")
+    print(f"Capture Rate: {total_kg_hr:.2f} kg/hr")
+    print(f"Capture Rate: {total_ton_day:.2f} tons/day")
+    print(f"Removal Efficiency: {efficiency:.2f}%")
+    print(f"Heat Generation Rate: {total_power_gen:.3f} MW")
+    
+    plt.figure(figsize=(8, 5))
+    plt.plot(z_final, y_final[0], label='Gas ($y_{CO2}$)')
+    plt.ylabel('Mole Fraction')
+    plt.twinx()
+    plt.plot(z_final, y_final[1], color='r', label='Liquid ($C_{OH}$)')
+    plt.ylabel('Concentration ($mol/m^3$)')
+    plt.title('Counter-Current Column Profile (solve_bvp)')
+    plt.show()
+else:
+    print("Solver failed:", sol.message)
+
+
+#%%%OLD MODEL
+# =============================================================================
+# z = np.linspace(0, L_col, N+1)
+# y_CO2 = np.zeros(N+1)
+# C_Hydroxide=np.zeros(N+1)
+# C_Hydroxide[0]=C_OH
+# y_CO2[0] = y_in
+# 
+# capture_rate = np.zeros(N)
+# 
+# for i in range(N):
+#     #get the partial Pressure of CO2
+#     p_CO2=y_CO2[i]*P_amb
+#     #Get the interfacial concentration
+#     
+#     H=get_Henry_Constant(T_amb, C_Hydroxide[i], C_Hydroxide[i]-C_OH)
+#     
+#     c_i=p_CO2/H #mol/m^3
+#     
+#     #Get the flux
+#     kL=calc_kL(T_amb, u_l)
+#     E=solve_E(T_amb,C_OH=C_Hydroxide[i],C_i=c_i)
+#     
+#     J=kL*c_i*E 
+#     #interfacial area
+#     A_i=dv*0.8*a #calc_aw(u_l, T_amb)*dv
+#     #CO2 absored in the dv
+#     mol_absorbed=J*A_i #mol/s
+#     capture_rate[i]=mol_absorbed
+#     
+#     #Next gas phase
+#     y_CO2[i+1]= y_CO2[i] - mol_absorbed/G_mol
+#     C_Hydroxide[i+1]=C_Hydroxide[i]-2*mol_absorbed/(u_l*Xs_col*dz)
+# =============================================================================
+
+# =============================================================================
+# total_capture=np.sum(capture_rate)
+# removal_fraction = (y_in - y_CO2[-1]) / y_in
+# 
+# kg_per_hr = total_capture * 44.01e-3 * 3600
+# ton_per_day=kg_per_hr/1000
+# print(ton_per_day)
+# print(f"Outlet CO2 mole fraction: {y_CO2[-1]:.4f}")
+# print(f"Total CO2 capture rate: {total_capture:.4f} mol/s")
+# print(f"Removed: {removal_fraction*100:.2f}%")
+# print(f"Removal fraction: {removal_fraction:.3f}")
+# 
+# print(f"Amount removed in kg/hr: {kg_per_hr:.3f}")
+# 
+# #%% Check Results
+# plt.plot(z, y_CO2)
+# plt.xlabel("Column height (m)")
+# plt.ylabel("CO2 mole fraction")
+# plt.title("CO2 Absorption in KOH Column (Version 1)")
+# plt.grid()
+# plt.show()
+# =============================================================================
+
+
+
 
 
 
