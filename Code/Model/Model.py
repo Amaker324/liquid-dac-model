@@ -18,13 +18,13 @@ from scipy.optimize import brentq
 
 #%% THESE ARE DESIGN PARAMETERS note a lot of these are based on the numbers from the paper
 L_col=7 # in meters length of column
-D_col= 225 # in meters, Diamter of column
+D_col=275 # in meters, Diamter of column
 
 
 u_g=1.48 #m/s this is gas velocity. want turbulent flow but too high means its inefficeint
 y_in=0.0004 #mol frac of CO2
 
-u_l=0.0005 #m/s Liquid velocity
+u_l=0.005 #m/s Liquid velocity
 
 RH=0.5
 
@@ -41,7 +41,7 @@ rho_l = 1000 #density of water just keeping it constant. Possible improvement he
 
 g = 9.81 #Gravity 
 
-
+cp_L=4184 #J/kgK
 #%% Packing Material
 a=210 #packing area m^2/m^3
 epsi = 0.8 #Packing void fraction
@@ -262,6 +262,32 @@ def get_Henry_Constant(T_K, C_OH,C_KCO3,C_K=C_OH):
     H = H0 * 10**(h_CO3*I_CO3+h_KOH*I_KOH) # Convert your C_OH to mol/L if it's in mol/m3
     return H*101.325 # atm L/mol to Pa m^3/mol
 
+def calc_hL(T_K, u_l):
+    """
+    Liquid-side heat transfer coefficient using Chilton-Colburn analogy
+    based on Onda kL correlation already implemented.
+    """
+
+    # properties
+    mu,_ =calc_properties(T_K)
+    rho =rho_l
+    # mass transfer coefficient
+    kL = calc_kL(T_K, u_l)
+
+    # diffusivity for Sc
+    D = calc_DL(T_K, mu)
+
+    # thermal diffusivity (rough water estimate)
+    k = 0.6  # W/m-K
+    alpha = k / (rho * cp_L)
+
+    Sc = mu / (rho * D)
+    Pr = mu / (rho * alpha)
+
+    hL = kL * rho * cp_L * (Sc / Pr)**(2/3)
+
+    return hL
+
 #%% Model.
 from scipy.integrate import solve_bvp
 
@@ -273,7 +299,7 @@ def odes(z,y):
     y[3] is T_L 
     y[4] is y_H2O humdity mol fraction
     """
-    L=z[-1]
+    
     
     
     dy_dz=np.zeros_like(y)
@@ -308,10 +334,10 @@ def odes(z,y):
         dy_dz[0,i]= -(flux*aw*Xs_col)/G_mol
         #liquid this one is confusing so trust????
         dy_dz[1,i]=2*flux*aw/u_l
-        h_heat=40 #fix to be more accurate
+        h_heat=calc_hL(T_L_val, u_l)
         #Temp of gas 
         dy_dz[2,i]= (h_heat*aw* (T_L_val-T_G_val))/(G_mol*MW_Air*1e3) 
-        dy_dz[3,i]= (h_heat*aw*(T_L_val-T_G_val) -flux_H2O*aw*44e3 + flux*aw*9e4 )/(u_l*rho_l*4184) # add reaction term
+        dy_dz[3,i]= (h_heat*aw*(T_G_val-T_L_val) -flux_H2O*aw*44e3 + flux*aw*9e4 )/(u_l*rho_l*4184) # add reaction term
         dy_dz[4,i]= flux_H2O*aw/G_mol
     return dy_dz
 
@@ -405,68 +431,29 @@ else:
     print("Solver failed:", sol.message)
 
 
-#%%%OLD MODEL
-# =============================================================================
-# z = np.linspace(0, L_col, N+1)
-# y_CO2 = np.zeros(N+1)
-# C_Hydroxide=np.zeros(N+1)
-# C_Hydroxide[0]=C_OH
-# y_CO2[0] = y_in
-# 
-# capture_rate = np.zeros(N)
-# 
-# for i in range(N):
-#     #get the partial Pressure of CO2
-#     p_CO2=y_CO2[i]*P_amb
-#     #Get the interfacial concentration
-#     
-#     H=get_Henry_Constant(T_amb, C_Hydroxide[i], C_Hydroxide[i]-C_OH)
-#     
-#     c_i=p_CO2/H #mol/m^3
-#     
-#     #Get the flux
-#     kL=calc_kL(T_amb, u_l)
-#     E=solve_E(T_amb,C_OH=C_Hydroxide[i],C_i=c_i)
-#     
-#     J=kL*c_i*E 
-#     #interfacial area
-#     A_i=dv*0.8*a #calc_aw(u_l, T_amb)*dv
-#     #CO2 absored in the dv
-#     mol_absorbed=J*A_i #mol/s
-#     capture_rate[i]=mol_absorbed
-#     
-#     #Next gas phase
-#     y_CO2[i+1]= y_CO2[i] - mol_absorbed/G_mol
-#     C_Hydroxide[i+1]=C_Hydroxide[i]-2*mol_absorbed/(u_l*Xs_col*dz)
-# =============================================================================
+print()
+print("=========================================")
+print()
+#%% Further processing
+#Outlet stream
 
-# =============================================================================
-# total_capture=np.sum(capture_rate)
-# removal_fraction = (y_in - y_CO2[-1]) / y_in
-# 
-# kg_per_hr = total_capture * 44.01e-3 * 3600
-# ton_per_day=kg_per_hr/1000
-# print(ton_per_day)
-# print(f"Outlet CO2 mole fraction: {y_CO2[-1]:.4f}")
-# print(f"Total CO2 capture rate: {total_capture:.4f} mol/s")
-# print(f"Removed: {removal_fraction*100:.2f}%")
-# print(f"Removal fraction: {removal_fraction:.3f}")
-# 
-# print(f"Amount removed in kg/hr: {kg_per_hr:.3f}")
-# 
-# #%% Check Results
-# plt.plot(z, y_CO2)
-# plt.xlabel("Column height (m)")
-# plt.ylabel("CO2 mole fraction")
-# plt.title("CO2 Absorption in KOH Column (Version 1)")
-# plt.grid()
-# plt.show()
-# =============================================================================
+vdot=Xs_col*u_l #m^3/s
+print(f"Volumetric flow: {vdot:.2f} m^3/s")
+C_KCO3=0.5*(C_OH-C_OH_outlet)
+mol_CO3=C_KCO3*vdot
+#%%% Pellet reactor
+H_CaCO3=-5.8e-3 #MJ/mol
+Q_PR=C_KCO3*vdot*H_CaCO3 # mol/m^3 * m^3/s * MJ/mol
+print(f"Heat released by pellet reactor: {Q_PR:.2f} MW")
+#assuming x amount of size of the reactor
+V_PR=10000 #m^3
+
+# Q=Mass*Cp*delta T
+T_risePR=-Q_PR*1e6 / (V_PR*rho_l*cp_L) # J/s / (m^3/s * kg/m^3 * J/kg K) --> K
+print(f"Temperature Rise in the pellet reactor assuming {V_PR:.0f} is {T_risePR:.4f}")
 
 
-
-
-
+#%%% 
 
 
 
