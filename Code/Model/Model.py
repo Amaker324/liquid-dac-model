@@ -24,7 +24,7 @@ D_col= 225 # in meters, Diamter of column
 u_g=1.48 #m/s this is gas velocity. want turbulent flow but too high means its inefficeint
 y_in=0.0004 #mol frac of CO2
 
-u_l=0.05 #m/s Liquid velocity
+u_l=0.0005 #m/s Liquid velocity
 
 RH=0.5
 
@@ -369,9 +369,11 @@ if sol.success:
     #total_mol_s = G_flux * Xs_col*(y_in - y_CO2_outlet)
     total_mol_s = G_mol*(y_in - y_CO2_outlet)
     
-    F_OH_in  = u_l * Xs_col * C_OH
-    F_OH_out = u_l * Xs_col * C_OH_outlet
-    total_mol_s = 0.5 * (F_OH_in - F_OH_out)
+# =============================================================================
+#     F_OH_in  = u_l * Xs_col * C_OH
+#     F_OH_out = u_l * Xs_col * C_OH_outlet
+#     total_mol_s = 0.5 * (F_OH_in - F_OH_out)
+# =============================================================================
     
     # 3. Convert to Mass
     total_kg_hr = total_mol_s * MW_CO2 * 3600
