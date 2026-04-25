@@ -24,24 +24,27 @@ D_col= 225 # in meters, Diamter of column
 u_g=1.48 #m/s this is gas velocity. want turbulent flow but too high means its inefficeint
 y_in=0.0004 #mol frac of CO2
 
-u_l=0.005 #m/s Liquid velocity
+u_l=0.05 #m/s Liquid velocity
 
-
+RH=0.5
 
 C_OH=1100
 
 #%%Constants
 R=8.314 
+
 MW_CO2=44.01e-3 #kg/mol
-#H=29.4e5 #Henries constant Pam^3/mol CO2 in water. THIS NEEDS UPDATING
-#kL=2e-4 #NOT ACCURATE
+MW_H2O=18.02e-3
+MW_Air=29.97e-3
+
 rho_l = 1000 #density of water just keeping it constant. Possible improvement here.
+
 g = 9.81 #Gravity 
 
-#E=500 #VERY INACCURATEW
+
 #%% Packing Material
 a=210 #packing area m^2/m^3
-epsi = 0.9 #Packing void fraction
+epsi = 0.8 #Packing void fraction
 #%% Process Conditions
 
 P_amb=101_325 #Pa
@@ -69,7 +72,10 @@ G_mol=(P_amb/(R*T_amb))*u_g*Xs_col
 #%% Function Helpers
 
 
-
+def get_Psat_H2O(T_K):
+    """Buck Equation idk look it up on wikipedia"""
+    T_C=T_K-273.15
+    return 6.1121*100 * np.exp( (18.678- T_C/234.5) * ( T_C/ ( 257.14+T_C) ) )
 
 
 def calc_properties(T_K):
@@ -263,31 +269,54 @@ def odes(z,y):
     """
     y[0] is y_CO2 
     y[1] is C_OH concentration mol/m^3
+    y[2] is T_G
+    y[3] is T_L 
+    y[4] is y_H2O humdity mol fraction
     """
-    y_CO2_val=y[0]
-    C_OH_val=y[1]
+    L=z[-1]
+    
+    
     dy_dz=np.zeros_like(y)
     
     for i in range(len(z)):
-        p_CO2=y_CO2_val[i]*P_amb
-        C_KCO3=(C_OH-C_OH_val[i])/2 #2 of OH react to make KCO3
-        H=get_Henry_Constant(T_amb, C_OH_val[i], C_KCO3)
+        y_CO2_val=y[0,i]
+        C_OH_val=y[1,i]
+        T_G_val=y[2,i]
+        T_L_val=y[3,i]
+        y_H2O_val=y[4,i]
+        
+        G_flux=u_g*P_amb/(R*T_G_val)
+        #print(G_flux)
+        p_CO2=y_CO2_val*P_amb
+        C_KCO3=(C_OH-C_OH_val)/2 #2 of OH react to make KCO3
+        H=get_Henry_Constant(T_L_val, C_OH_val, C_KCO3)
+        aw=calc_aw(u_l, T_L_val)
         C_i=p_CO2/H
         
-        kL=calc_kL(T_amb, u_l)
+        kL=calc_kL(T_L_val, u_l)
         
-        E=solve_E(T_amb,C_OH=max(C_OH,1e-9), C_i=max(C_i,1e-9))
+        E=solve_E(T_L_val,C_OH=max(C_OH_val,1e-9), C_i=max(C_i,1e-9))
         flux=kL*C_i*E
         
-        #ODEs
-        dy_dz[0,i]= -(flux*a*Xs_col)/G_mol
-        #liquid this one is confusing so trust????
-        dy_dz[1,i]=2*flux*a/u_l
+        y_sat=get_Psat_H2O(T_L_val)/P_amb
+        kg=0.05 # fix to be more accurate
+        flux_H2O=kg*(y_sat-y_H2O_val)/R/T_G_val
         
+        
+        #ODEs
+        #dy_dz[0,i]= -(flux)/G_flux 
+        dy_dz[0,i]= -(flux*aw*Xs_col)/G_mol
+        #liquid this one is confusing so trust????
+        dy_dz[1,i]=2*flux*aw/u_l
+        h_heat=40 #fix to be more accurate
+        #Temp of gas 
+        dy_dz[2,i]= (h_heat*aw* (T_L_val-T_G_val))/(G_mol*MW_Air*1e3) 
+        dy_dz[3,i]= (h_heat*aw*(T_L_val-T_G_val) -flux_H2O*aw*44e3 + flux*aw*9e4 )/(u_l*rho_l*4184) # add reaction term
+        dy_dz[4,i]= flux_H2O*aw/G_mol
     return dy_dz
 
 
-def boundary_cond(ya,yb):
+def boundary_cond(yb,yt):
     """
     
 
@@ -303,9 +332,12 @@ def boundary_cond(ya,yb):
     RESIDUALS
 
     """
-    res1=ya[0]-y_in
-    res2=yb[1]-C_OH
-    return np.array([res1,res2])
+    res1=yb[0]-y_in
+    res3=yb[2]-T_amb
+    res2=yt[1]-C_OH
+    res4=yt[3]-T_amb
+    res5=yb[4]-(RH*get_Psat_H2O(T_amb)/P_amb)
+    return np.array([res1,res2,res3,res4,res5])
 
 
 
@@ -313,11 +345,14 @@ def boundary_cond(ya,yb):
 #Solver stuff
 
 Z_vals=np.linspace(0,L_col,50)
-y_guess=np.zeros((2,Z_vals.size))
-y_guess[0,:]=np.linspace(y_in, y_in*0.1, Z_vals.size)
-y_guess[1,:]=np.linspace(C_OH*0.8,C_OH,Z_vals.size)
+y_init = np.zeros((5, Z_vals.size))
+y_init[0,:] = y_in
+y_init[1,:] = C_OH
+y_init[2,:] = T_amb
+y_init[3,:] = T_amb
+y_init[4,:] = 0.01
 
-sol=solve_bvp(odes, boundary_cond, Z_vals, y_guess)
+sol=solve_bvp(odes, boundary_cond, Z_vals, y_init)
 
 if sol.success:
     z_final = np.linspace(0, L_col, 100)
@@ -327,9 +362,16 @@ if sol.success:
     y_CO2_outlet = y_final[0, -1]  # Gas mole fraction at z = L (Top)
     C_OH_outlet = y_final[1, 0]    # Liquid concentration at z = 0 (Bottom)
     
+    
+    G_flux=u_g*P_amb/(R*T_amb)
     # 2. Calculate Total Absorption (Molar)
     # Total CO2 absorbed = Gas Flow Rate * (Inlet mole fraction - Outlet mole fraction)
-    total_mol_s = G_mol * (y_in - y_CO2_outlet)
+    #total_mol_s = G_flux * Xs_col*(y_in - y_CO2_outlet)
+    total_mol_s = G_mol*(y_in - y_CO2_outlet)
+    
+    F_OH_in  = u_l * Xs_col * C_OH
+    F_OH_out = u_l * Xs_col * C_OH_outlet
+    total_mol_s = 0.5 * (F_OH_in - F_OH_out)
     
     # 3. Convert to Mass
     total_kg_hr = total_mol_s * MW_CO2 * 3600
@@ -339,8 +381,7 @@ if sol.success:
     # 4. Removal Efficiency
     efficiency = (y_in - y_CO2_outlet) / y_in * 100
 
-    # 5. Power
-    total_power_gen=total_mol_s*(-95.8)/1000
+
     print("--- Absorption Results ---")
     print(f"Outlet CO2: {y_CO2_outlet:.6f} mol/mol")
     print(f"Outlet KOH: {C_OH_outlet:.2f} mol/m^3")
@@ -348,7 +389,7 @@ if sol.success:
     print(f"Capture Rate: {total_kg_hr:.2f} kg/hr")
     print(f"Capture Rate: {total_ton_day:.2f} tons/day")
     print(f"Removal Efficiency: {efficiency:.2f}%")
-    print(f"Heat Generation Rate: {total_power_gen:.3f} MW")
+
     
     plt.figure(figsize=(8, 5))
     plt.plot(z_final, y_final[0], label='Gas ($y_{CO2}$)')
