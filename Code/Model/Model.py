@@ -18,15 +18,15 @@ from scipy.optimize import brentq
 
 #%% THESE ARE DESIGN PARAMETERS note a lot of these are based on the numbers from the paper
 L_col=7 # in meters length of column
-D_col=275 # in meters, Diamter of column
-
+#D_col=275 # in meters, Diamter of column
+Xs_col=40_000#np.pi*(D_col/2)**2 # Cross sectional area of column 
 
 u_g=1.48 #m/s this is gas velocity. want turbulent flow but too high means its inefficeint
 y_in=0.0004 #mol frac of CO2
 
 u_l=0.005 #m/s Liquid velocity
 
-RH=0.5
+RH=0.7
 
 C_OH=1100
 
@@ -57,7 +57,7 @@ T_amb=298 #25 degrees C may change this to accept only C no Kelvin
 N=200 #number of discrete spots in the column
 dz=L_col/N
 
-Xs_col=np.pi*(D_col/2)**2 # Cross sectional area of column 
+
 #Note need to add effective diameter and cross section. But thats for later
 dv=dz*Xs_col
 
@@ -441,31 +441,94 @@ vdot=Xs_col*u_l #m^3/s
 print(f"Volumetric flow: {vdot:.2f} m^3/s")
 C_KCO3=0.5*(C_OH-C_OH_outlet)
 mol_CO3=C_KCO3*vdot
+
+
 #%%% Pellet reactor
-H_CaCO3=-5.8e-3 #MJ/mol
-Q_PR=C_KCO3*vdot*H_CaCO3 # mol/m^3 * m^3/s * MJ/mol
-print(f"Heat released by pellet reactor: {Q_PR:.2f} MW")
-#assuming x amount of size of the reactor
-V_PR=10000 #m^3
+# =============================================================================
+# H_CaCO3=-5.8e-3 #MJ/mol
+# Q_PR=C_KCO3*vdot*H_CaCO3 # mol/m^3 * m^3/s * MJ/mol
+# print(f"Heat released by pellet reactor: {Q_PR:.2f} MW")
+# #assuming x amount of size of the reactor
+# V_PR=10000 #m^3
+# 
+# # Q=Mass*Cp*delta T
+# T_risePR=-Q_PR*1e6 / (V_PR*rho_l*cp_L) # J/s / (m^3/s * kg/m^3 * J/kg K) --> K
+# print(f"Temperature Rise in the pellet reactor assuming {V_PR:.0f} is {T_risePR:.4f}")
+# 
+# =============================================================================
 
-# Q=Mass*Cp*delta T
-T_risePR=-Q_PR*1e6 / (V_PR*rho_l*cp_L) # J/s / (m^3/s * kg/m^3 * J/kg K) --> K
-print(f"Temperature Rise in the pellet reactor assuming {V_PR:.0f} is {T_risePR:.4f}")
+#%% Further process specs
+def pellet_reactor(vdot_L, C_OH_in, C_K2CO3_in, X=1):
+    "lumped Pellet reactor"
+    n_OH_in=vdot_L*C_OH_in #mol/s
+    n_CO3_in=vdot_L*C_K2CO3_in
+    
+    n_CO3_rxn=X*n_CO3_in
+    
+    
+    n_CaOH2=n_CO3_rxn
+    n_CaCO3=n_CO3_rxn
+    n_OH_out=n_OH_in+2*n_CO3_rxn
+    n_CO3_out=n_CO3_in-n_CO3_rxn
+    
+    
+    C_OH_out=n_OH_out/vdot_L
+    C_CO3_out=n_CO3_out/vdot_L
+    
+    
+    dH=-5.8e3 #J/mol
+    Q=n_CaCO3*dH
+    return [C_OH_out,C_CO3_out,n_CaCO3,n_CaOH2,Q]
+#end
+
+def pellet_separator(n_CaCO3, solids_recovery=1):
+    solids_to_calciner= solids_recovery * n_CaCO3
+    fines_loss=(1 - solids_recovery) * n_CaCO3
+    return solids_to_calciner, fines_loss
+#end
+
+def calciner(n_CaCO3, X=1):
+    n_rxn=X*n_CaCO3
+
+    n_CaO=n_rxn
+    n_CO2=n_rxn
+    n_unreacted=n_CaCO3 - n_rxn
+
+    # J/mol CaCO3
+    dH = 178.3e3
+    Q = n_rxn * dH
+
+    return [n_CaO, n_CO2,n_unreacted,Q]
+#end
+
+def slaker(n_CaO, X=1):
+    n_rxn= X * n_CaO
+    n_CaOH2= n_rxn
+
+    dH= -63.9e3  # J/mol
+    Q =n_rxn * dH
+
+    return [n_CaOH2,Q]
 
 
-#%%% 
 
 
+C_OH_outPR,C_CO3_outPR,n_CaCO3PR,n_CaOH2PR,Q_PR=pellet_reactor(vdot, C_OH_outlet, C_KCO3)
+Q_PR=Q_PR/1e3 #kW
+n_CaOCalc, n_CO2Calc, n_CaCO3Calc,Q_calc=calciner(n_CaCO3PR)
+Q_calc=Q_calc/1e3 #kW
 
+n_CaOH2Slak, Q_slak=slaker(n_CaOCalc)
+Q_slak=Q_slak/1e3
 
+Mass_CO2=n_CO2Calc*MW_CO2*3600/1000*24 #mol/s --> metric ton/day
+print("=================")
+print("Results:")
+print(f"Metric tons of CO2 per day: {Mass_CO2:.2f}")
+print(f"Heat from Pellet Reactor: {Q_PR:.3f} kW" )
+print(f"Heat from Slaker: {Q_slak:.3f} kW")
 
-
-
-
-
-
-
-
+print(f"Heat from Calciner: {Q_calc:.3f} kW" )
 
 
 
