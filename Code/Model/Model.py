@@ -26,9 +26,14 @@ y_in=0.0004 #mol frac of CO2
 
 u_l=0.005 #m/s Liquid velocity
 
-RH=0.7
+RH=0.5
 
 C_OH=1100
+
+T_pellet=298.15
+T_slaker=300+273.15
+T_calciner=900+273.15
+
 
 #%%Constants
 R=8.314 
@@ -36,12 +41,19 @@ R=8.314
 MW_CO2=44.01e-3 #kg/mol
 MW_H2O=18.02e-3
 MW_Air=29.97e-3
+MW_CaCO3=100.09e-3
+MW_CaO=56.08e-3
+MW_CaOH2=74.09e-3
+
+cp_CaCO3=1100 #J/kgK
+cp_CaO=900
+cp_L=4184 #J/kgK
 
 rho_l = 1000 #density of water just keeping it constant. Possible improvement here.
 
 g = 9.81 #Gravity 
 
-cp_L=4184 #J/kgK
+
 #%% Packing Material
 a=210 #packing area m^2/m^3
 epsi = 0.8 #Packing void fraction
@@ -305,12 +317,13 @@ def odes(z,y):
     dy_dz=np.zeros_like(y)
     
     for i in range(len(z)):
+        
         y_CO2_val=y[0,i]
         C_OH_val=y[1,i]
         T_G_val=y[2,i]
         T_L_val=y[3,i]
         y_H2O_val=y[4,i]
-        
+        G_mol=(P_amb/(R*T_G_val))*u_g*Xs_col
         G_flux=u_g*P_amb/(R*T_G_val)
         #print(G_flux)
         p_CO2=y_CO2_val*P_amb
@@ -325,20 +338,22 @@ def odes(z,y):
         flux=kL*C_i*E
         
         y_sat=get_Psat_H2O(T_L_val)/P_amb
-        kg=0.05 # fix to be more accurate
-        flux_H2O=kg*(y_sat-y_H2O_val)/R/T_G_val
+        
+        kg=0.025 # fix to be more accurate
+        flux_H2O=kg*(y_sat-y_H2O_val)/(R*T_G_val)
         
         
         #ODEs
         #dy_dz[0,i]= -(flux)/G_flux 
-        dy_dz[0,i]= -(flux*aw*Xs_col)/G_mol
+        dy_dz[0,i]= -(flux*aw)/G_flux # mol/m^2 s * m^2/m^3 / mol/m^2s --> 1/m
         #liquid this one is confusing so trust????
-        dy_dz[1,i]=2*flux*aw/u_l
-        h_heat=calc_hL(T_L_val, u_l)
+        dy_dz[1,i]=2*flux*aw/u_l # mol/m^2s * m^2/m^3 / m/s --> mol/m^3 1/m
+        h_heat=calc_hL(T_L_val, u_l) # J/m^2sK
         #Temp of gas 
-        dy_dz[2,i]= (h_heat*aw* (T_L_val-T_G_val))/(G_mol*MW_Air*1e3) 
-        dy_dz[3,i]= (h_heat*aw*(T_G_val-T_L_val) -flux_H2O*aw*44e3 + flux*aw*9e4 )/(u_l*rho_l*4184) # add reaction term
-        dy_dz[4,i]= flux_H2O*aw/G_mol
+        dy_dz[2,i]= (h_heat*aw* (T_L_val-T_G_val))/(G_mol*MW_Air*1e3) #-->J/m^2sK * m^2/m^3 * K/ / (mol/s * kg/mol* J/kg K) -->  
+        dy_dz[3,i]= -(h_heat*aw*(T_G_val-T_L_val) -flux_H2O*aw*44e3 + flux*aw*9e4 )/(u_l*rho_l*4184) # add reaction term
+        dy_dz[4,i]= flux_H2O*aw/G_flux
+      
     return dy_dz
 
 
@@ -387,14 +402,18 @@ if sol.success:
     # 1. Grab the outlet concentrations
     y_CO2_outlet = y_final[0, -1]  # Gas mole fraction at z = L (Top)
     C_OH_outlet = y_final[1, 0]    # Liquid concentration at z = 0 (Bottom)
-    
+    y_H2O_out=y_final[4,-1]
     
     G_flux=u_g*P_amb/(R*T_amb)
     # 2. Calculate Total Absorption (Molar)
     # Total CO2 absorbed = Gas Flow Rate * (Inlet mole fraction - Outlet mole fraction)
     #total_mol_s = G_flux * Xs_col*(y_in - y_CO2_outlet)
     total_mol_s = G_mol*(y_in - y_CO2_outlet)
-    
+    n_H2O_out=y_H2O_out*G_mol
+    y_H2O_in= RH * get_Psat_H2O(T_amb)/ P_amb
+    n_evap=n_H2O_out-y_H2O_in*G_mol
+    n_evap_perHr=n_evap*60*60
+    kgWaterLostPerHr=n_evap_perHr*MW_H2O
 # =============================================================================
 #     F_OH_in  = u_l * Xs_col * C_OH
 #     F_OH_out = u_l * Xs_col * C_OH_outlet
@@ -417,7 +436,9 @@ if sol.success:
     print(f"Capture Rate: {total_kg_hr:.2f} kg/hr")
     print(f"Capture Rate: {total_ton_day:.2f} tons/day")
     print(f"Removal Efficiency: {efficiency:.2f}%")
-
+    print(f"# of moles of water lost per hour: {n_evap_perHr:.2f}")
+    print(f"# of moles of water lost per second: {n_evap:.2f}")
+    print(f"kg of water lost per hour: {kgWaterLostPerHr:.2f}")
     
     plt.figure(figsize=(8, 5))
     plt.plot(z_final, y_final[0], label='Gas ($y_{CO2}$)')
@@ -512,7 +533,7 @@ def slaker(n_CaO, X=1):
 
 
 
-
+#%% calculations
 C_OH_outPR,C_CO3_outPR,n_CaCO3PR,n_CaOH2PR,Q_PR=pellet_reactor(vdot, C_OH_outlet, C_KCO3)
 Q_PR=Q_PR/1e3 #kW
 n_CaOCalc, n_CO2Calc, n_CaCO3Calc,Q_calc=calciner(n_CaCO3PR)
@@ -531,10 +552,52 @@ print(f"Heat from Slaker: {Q_slak:.3f} kW")
 print(f"Heat from Calciner: {Q_calc:.3f} kW" )
 
 
+# --- Sensible Heat Requirements ---
+
+# 1. Heating CaCO3 pellets from Pellet Reactor (25C) to Calciner (900C)
+mass_flow_CaCO3 = n_CaCO3PR * MW_CaCO3 # kg/s
+Q_sens_CaCO3 = mass_flow_CaCO3 * cp_CaCO3 * (T_calciner - T_pellet) # Watts
+
+# 2. Heating/Cooling CaO from Calciner (900C) to Slaker (100C)
+# Note: This is usually heat RECOVERED to preheat the calciner feed
+mass_flow_CaO = n_CaOCalc * MW_CaO # kg/s
+Q_sens_CaO = mass_flow_CaO * cp_CaO * (T_calciner - T_slaker) # Watts
+
+# 3. Heating the KOH solution returned from Slaker/Clarifier back to Contactor 
+# (Usually negligible unless there's a specific process heater)
+Q_sens_Soln = vdot * rho_l * cp_L * (T_pellet - T_amb) # J/s (Watts)
+
+# --- Total Energy Summary ---
 
 
+total_thermal_demand_kW = (
+    Q_calc +                # Heat of reaction (Endothermic)
+    (Q_sens_CaCO3 / 1000) + # Sensible heat to reach 900C
+    (Q_sens_CaO / 1000 ) # Credit for recovered heat from CaO cooling
+)
 
 
+print("=========================================")
+print("     EXTENDED ENERGY & MASS BALANCE     ")
+print("=========================================")
+print(f"Capture Performance:")
+print(f"  - CO2 Captured:        {Mass_CO2:.2f} t/day")
+print(f"  - Removal Efficiency:  {efficiency:.2f} %")
+print(f"  - Water Loss:          {kgWaterLostPerHr:.2f} kg/hr")
+
+print(f"\nReaction Heats (Negative = Exothermic):")
+print(f"  - Pellet Reactor:      {Q_PR/1000:.2f} MW")
+print(f"  - Slaker:              {Q_slak/1000:.2f} MW")
+print(f"  - Calciner (Rxn):      {Q_calc/1000:.2f} MW")
+
+print(f"\nSensible Heat Demands (Pre-recovery):")
+print(f"  - Heat CaCO3 25C to 900C:  {Q_sens_CaCO3/1e6:.2f} MW")
+print(f"  - CaO Cooling Potential: {Q_sens_CaO/1e6:.2f} MW")
+
+print(f"\nTotal Plant Thermal Estimate:")
+print(f"  - Net Thermal Load:    {total_thermal_demand_kW/1000:.2f} MW")
+print(f"  - Specific Energy:     {(total_thermal_demand_kW*3600/1000) / (total_kg_hr):.2f} GJ/t-CO2")
+print("=========================================")
 
 
 
