@@ -15,20 +15,20 @@ etc.
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.optimize import brentq
+import pandas as pd
 
 #%% THESE ARE DESIGN PARAMETERS note a lot of these are based on the numbers from the paper
 L_col=7 # in meters length of column
-#D_col=275 # in meters, Diamter of column
-Xs_col=40_000#np.pi*(D_col/2)**2 # Cross sectional area of column 
+Xs_col=45_000 # Cross sectional area of column 
 
-u_g=1.48 #m/s this is gas velocity. want turbulent flow but too high means its inefficeint
+u_g=1.6 #m/s this is gas velocity. want turbulent flow but too high means its inefficeint
 y_in=0.0004 #mol frac of CO2
 
-u_l=0.005 #m/s Liquid velocity
+u_l=0.01 #m/s Liquid velocity
 
 RH=0.5
 
-C_OH=1100
+C_OH=1100 #mol/m^3
 
 T_pellet=298.15
 T_slaker=300+273.15
@@ -45,9 +45,11 @@ MW_CaCO3=100.09e-3
 MW_CaO=56.08e-3
 MW_CaOH2=74.09e-3
 
-cp_CaCO3=1100 #J/kgK
-cp_CaO=900
+cp_CaCO3=0.76e3 #J/kgK
+cp_CaO=(737+1800)/2 # from https://doi.org/10.1016/j.rser.2025.115678 average
 cp_L=4184 #J/kgK
+cp_CaOH2 = 1200
+
 
 rho_l = 1000 #density of water just keeping it constant. Possible improvement here.
 
@@ -552,36 +554,43 @@ print(f"Heat from Slaker: {Q_slak:.3f} kW")
 print(f"Heat from Calciner: {Q_calc:.3f} kW" )
 
 
-# --- Sensible Heat Requirements ---
+#Sensible Heat Requirements
 
 # 1. Heating CaCO3 pellets from Pellet Reactor (25C) to Calciner (900C)
 mass_flow_CaCO3 = n_CaCO3PR * MW_CaCO3 # kg/s
 Q_sens_CaCO3 = mass_flow_CaCO3 * cp_CaCO3 * (T_calciner - T_pellet) # Watts
 
-# 2. Heating/Cooling CaO from Calciner (900C) to Slaker (100C)
+# 2. Heating/Cooling CaO from Calciner (900C) to Slaker (300C)
 # Note: This is usually heat RECOVERED to preheat the calciner feed
 mass_flow_CaO = n_CaOCalc * MW_CaO # kg/s
 Q_sens_CaO = mass_flow_CaO * cp_CaO * (T_calciner - T_slaker) # Watts
 
 # 3. Heating the KOH solution returned from Slaker/Clarifier back to Contactor 
 # (Usually negligible unless there's a specific process heater)
+mass_flow_CaOH2 = n_CaOH2Slak * MW_CaOH2
+Q_cool_CaOH2 = mass_flow_CaOH2 * cp_CaOH2 * (T_pellet - T_slaker)
 Q_sens_Soln = vdot * rho_l * cp_L * (T_pellet - T_amb) # J/s (Watts)
-
+Q_into_liquid_loop_MW = (Q_PR + Q_cool_CaOH2/ 1000)/1000
 # --- Total Energy Summary ---
 
 
 total_thermal_demand_kW = (
-    Q_calc +                # Heat of reaction (Endothermic)
-    (Q_sens_CaCO3 / 1000) + # Sensible heat to reach 900C
-    (Q_sens_CaO / 1000 ) # Credit for recovered heat from CaO cooling
+    Q_calc +                # Heat of reaction 
+    (Q_sens_CaCO3 / 1000) + # Sensible heat from HEATING
+    abs(Q_sens_CaO / 1000 ) +  #Sensible heat from COOLING
+    abs(Q_into_liquid_loop_MW*1e3) #Sensible heat from COOLING +rxn
 )
 
+Q_into_liquid_loop_MW = (Q_PR + Q_cool_CaOH2/ 1000)/1000
+
+Trise=Q_into_liquid_loop_MW*1e6/(cp_L*vdot*rho_l)
 
 print("=========================================")
 print("     EXTENDED ENERGY & MASS BALANCE     ")
 print("=========================================")
 print(f"Capture Performance:")
 print(f"  - CO2 Captured:        {Mass_CO2:.2f} t/day")
+print(f"  - CO2 Captured:        {Mass_CO2*365/1000_000:.2f} Mt/year")
 print(f"  - Removal Efficiency:  {efficiency:.2f} %")
 print(f"  - Water Loss:          {kgWaterLostPerHr:.2f} kg/hr")
 
@@ -594,10 +603,306 @@ print(f"\nSensible Heat Demands (Pre-recovery):")
 print(f"  - Heat CaCO3 25C to 900C:  {Q_sens_CaCO3/1e6:.2f} MW")
 print(f"  - CaO Cooling Potential: {Q_sens_CaO/1e6:.2f} MW")
 
+print(f"Heat Dumped into KOH Loop:  {Q_into_liquid_loop_MW:.2f} MW")
+
 print(f"\nTotal Plant Thermal Estimate:")
 print(f"  - Net Thermal Load:    {total_thermal_demand_kW/1000:.2f} MW")
 print(f"  - Specific Energy:     {(total_thermal_demand_kW*3600/1000) / (total_kg_hr):.2f} GJ/t-CO2")
 print("=========================================")
 
+#%% ============================================================
+# ENERGY INTEGRATION: CLEAN SCENARIO ANALYSIS
+# ============================================================
+# This block REPLACES everything after:
+# "EXTENDED ENERGY & MASS BALANCE"
+#
+# Philosophy:
+#   Stage 1 = Base process (no recovery)
+#   Stage 2 = HEN / Pinch (internal recovery only)
+#   Stage 3 = HEN + Heat Pump (utility upgrade)
+#
+# Your extended mass & energy balance above remains the thermodynamic source
+# of truth. This section is ONLY post-processing utility analysis.
+# ============================================================
+
+#%% -----------------------------
+# Helper Functions
+# -----------------------------
+def shift_streams(df, DTmin):
+    """
+    Apply pinch temperature shifting.
+    Hot streams shifted down by DTmin/2
+    Cold streams shifted up by DTmin/2
+    """
+    df = df.copy()
+    df["Ts_shift"] = np.where(df["type"] == "hot",  df["Ts"] - DTmin/2, df["Ts"] + DTmin/2)
+    df["Tt_shift"] = np.where(df["type"] == "hot",  df["Tt"] - DTmin/2, df["Tt"] + DTmin/2)
+    return df
 
 
+def build_interval_table(df):
+    """
+    Build pinch interval table from shifted streams.
+    Returns interval dataframe used for heat cascade.
+    """
+    temps = sorted(set(df["Ts_shift"]).union(set(df["Tt_shift"])), reverse=True)
+    rows = []
+
+    for i in range(len(temps) - 1):
+        Th = temps[i]
+        Tl = temps[i + 1]
+        dT = Th - Tl
+
+        hot_active = df[
+            (df["type"] == "hot") &
+            (df["Ts_shift"] >= Th) &
+            (df["Tt_shift"] <= Tl)
+        ]
+
+        cold_active = df[
+            (df["type"] == "cold") &
+            (df["Tt_shift"] >= Th) &
+            (df["Ts_shift"] <= Tl)
+        ]
+
+        CP_hot = hot_active["CP"].sum()
+        CP_cold = cold_active["CP"].sum()
+
+        dCP = CP_hot - CP_cold
+        dH = dCP * dT
+
+        rows.append([Th, Tl, dT, CP_hot, CP_cold, dCP, dH])
+
+    return pd.DataFrame(
+        rows,
+        columns=["Th", "Tl", "dT", "CP_hot", "CP_cold", "dCP", "dH"]
+    )
+
+
+def heat_cascade(intervals):
+    """
+    Perform heat cascade and return:
+    cascade, QHmin, QCmin
+    """
+    H = [0.0]
+    for dH in intervals["dH"]:
+        H.append(H[-1] + dH)
+
+    H = np.array(H)
+    QHmin = max(0.0, -H.min())
+    cascade = H + QHmin
+    QCmin = cascade[-1]
+
+    return cascade, QHmin, QCmin
+
+
+def build_stream_table():
+    """
+    Build process stream table directly from base-case model results.
+    All temperatures in C
+    CP in kW/K
+    """
+    cp_CO2 = 1.15e3  # J/kg-K
+
+    m_CO2 = n_CO2Calc * MW_CO2
+    m_H2O = max(n_CaOCalc * MW_H2O, 1e-9)
+
+    CP_vals = {
+        "CaO":   (mass_flow_CaO   * cp_CaO)   / 1000,   # kW/K
+        "CaCO3": (mass_flow_CaCO3 * cp_CaCO3) / 1000,   # kW/K
+        "CO2":   (m_CO2           * cp_CO2)   / 1000,   # kW/K
+        "Water": (m_H2O           * cp_L)     / 1000,   # kW/K
+        "CaOH2": (mass_flow_CaOH2 * cp_CaOH2) / 1000    # kW/K
+    }
+
+    streams = pd.DataFrame([
+        ["H1_CaO",    "hot",  900.0, 300.0, CP_vals["CaO"]],
+        ["H2_Slaker", "hot",  300.0,  40.0, CP_vals["CaOH2"]],
+        ["H3_CO2",    "hot",  900.0, 100.0, CP_vals["CO2"]],
+        ["C1_CaCO3",  "cold",  25.0, 900.0, CP_vals["CaCO3"]],
+        ["C2_Water",  "cold",  25.0,  95.0, CP_vals["Water"]],
+    ], columns=["name", "type", "Ts", "Tt", "CP"])
+
+    return streams, CP_vals
+
+
+def run_pinch(streams, DTmin=10.0):
+    """
+    Run pinch analysis and return:
+    intervals, cascade, QHmin, QCmin
+    """
+    shifted = shift_streams(streams, DTmin)
+    intervals = build_interval_table(shifted)
+    cascade, QHmin, QCmin = heat_cascade(intervals)
+    return intervals, cascade, QHmin, QCmin
+
+
+def run_heat_pump(Q_hot_hen, Q_cold_hen, T_source_C=25.0, T_sink_C=95.0, eta=0.45):
+    """
+    Simple industrial heat pump model.
+
+    Inputs:
+        Q_hot_hen  = residual hot utility after HEN (kW)
+        Q_cold_hen = residual cold utility after HEN (kW)
+
+    Returns:
+        dict with HP performance and updated utility loads
+    """
+    T_source_K = T_source_C + 273.15
+    T_sink_K   = T_sink_C + 273.15
+
+    COP = eta * (T_sink_K / (T_sink_K - T_source_K))
+
+    # available low-grade heat in KOH loop (kW)
+    Q_koh_available = abs(Q_into_liquid_loop_MW * 1000)
+
+    # evaporator duty limited by:
+    #   1. remaining cold utility
+    #   2. remaining hot utility
+    #   3. actual low-grade heat available
+    Q_hp_source = min(Q_cold_hen, Q_hot_hen, Q_koh_available)
+
+    if COP <= 1.0 or Q_hp_source <= 0:
+        return {
+            "COP": COP,
+            "Q_hp_source": 0.0,
+            "W_hp": 0.0,
+            "Q_hp_sink": 0.0,
+            "Q_hot_final": Q_hot_hen,
+            "Q_cold_final": Q_cold_hen
+        }
+
+    W_hp = Q_hp_source / (COP - 1.0)
+    Q_hp_sink = Q_hp_source + W_hp
+
+    Q_hot_final = max(0.0, Q_hot_hen - Q_hp_sink)
+    Q_cold_final = max(0.0, Q_cold_hen - Q_hp_source)
+
+    return {
+        "COP": COP,
+        "Q_hp_source": Q_hp_source,
+        "W_hp": W_hp,
+        "Q_hp_sink": Q_hp_sink,
+        "Q_hot_final": Q_hot_final,
+        "Q_cold_final": Q_cold_final
+    }
+
+
+def scenario_summary():
+    """
+    Master scenario comparison:
+        1. Base Case  (gross thermal turnover basis)
+        2. HEN        (gross utility burden after pinch)
+        3. HEN + HP   (gross utility burden after upgrading)
+
+    All three stages are reported on the SAME basis:
+
+        Gross Thermal Burden = Hot Utility + Cold Utility
+
+    This keeps Stage 1 / 2 / 3 directly comparable.
+    """
+    streams, CP_vals = build_stream_table()
+
+    # --------------------------------------------------------
+    # STAGE 1: BASE CASE (MATCHES ORIGINAL 7.22 GJ/t BASIS)
+    # --------------------------------------------------------
+    # Gross thermal turnover before integration:
+    #   endothermic heating
+    # + sensible heating
+    # + internally rejected thermal burden
+    #
+    # This reproduces your original 7.22 GJ/t basis.
+    Q_hot_base = (
+        Q_calc +                        # calciner reaction
+        (Q_sens_CaCO3 / 1000) +         # CaCO3 heating
+        abs(Q_sens_CaO / 1000) +        # CaO cooling burden
+        abs(Q_into_liquid_loop_MW * 1000)   # liquid loop thermal dump
+    )  # kW
+
+    # Explicit cooling ledger (reported separately for transparency)
+    Q_cold_base = (
+        abs(Q_sens_CaO / 1000) +   # CaO cooling
+        abs(Q_PR) +                # pellet exotherm
+        abs(Q_slak)                # slaker exotherm
+    )  # kW
+
+    # For Stage 1 your "hot" ledger already represents gross plant burden
+    Q_gross_base = Q_hot_base
+
+    # --------------------------------------------------------
+    # STAGE 2: HEN
+    # --------------------------------------------------------
+    intervals, cascade, QHmin, QCmin = run_pinch(streams, DTmin=10.0)
+
+    # Remaining external utilities after passive recovery
+    Q_hot_hen = Q_calc + QHmin
+    Q_cold_hen = QCmin
+
+    # Gross post-HEN utility burden
+    Q_gross_hen = Q_hot_hen + Q_cold_hen
+
+    # --------------------------------------------------------
+    # STAGE 3: HEN + HP
+    # --------------------------------------------------------
+    hp = run_heat_pump(Q_hot_hen, Q_cold_hen)
+
+    # Gross post-HP utility burden
+    Q_gross_hp = hp["Q_hot_final"] + hp["Q_cold_final"]
+
+    # --------------------------------------------------------
+    # PRINT SUMMARY
+    # --------------------------------------------------------
+    print("\n" + "="*55)
+    print("ENERGY INTEGRATION SCENARIO ANALYSIS")
+    print("="*55)
+
+    print("\n--- STAGE 1: BASE CASE (GROSS THERMAL TURNOVER) ---")
+    print(f"Hot Utility Ledger:     {Q_hot_base/1000:.2f} MW")
+    print(f"Cold Utility Ledger:    {Q_cold_base/1000:.2f} MW")
+    print(f"Gross Thermal Burden:   {Q_gross_base/1000:.2f} MW")
+    print(f"Specific Gross Duty:    {(Q_gross_base*3.6)/total_kg_hr:.2f} GJ/t-CO2")
+
+    print("\n--- STAGE 2: HEN (PINCH) ---")
+    print(f"Minimum Hot Utility:    {Q_hot_hen/1000:.2f} MW")
+    print(f"Minimum Cold Utility:   {Q_cold_hen/1000:.2f} MW")
+    print(f"Gross Thermal Burden:   {Q_gross_hen/1000:.2f} MW")
+    print(f"Thermal Saved vs Base:  {(Q_gross_base - Q_gross_hen)/1000:.2f} MW")
+    print(f"Specific Gross Duty:    {(Q_gross_hen*3.6)/total_kg_hr:.2f} GJ/t-CO2")
+
+    print("\n--- STAGE 3: HEN + HEAT PUMP ---")
+    print(f"Heat Pump COP:          {hp['COP']:.2f}")
+    print(f"HP Evaporator Duty:     {hp['Q_hp_source']/1000:.2f} MW")
+    print(f"HP Compressor Power:    {hp['W_hp']/1000:.2f} MW(e)")
+    print(f"HP Condenser Duty:      {hp['Q_hp_sink']/1000:.2f} MW")
+    print(f"Final Hot Utility:      {hp['Q_hot_final']/1000:.2f} MW")
+    print(f"Final Cold Utility:     {hp['Q_cold_final']/1000:.2f} MW")
+    print(f"Gross Thermal Burden:   {Q_gross_hp/1000:.2f} MW")
+    print(f"Thermal Saved vs Base:  {(Q_gross_base - Q_gross_hp)/1000:.2f} MW")
+    print(f"Specific Gross Duty:    {(Q_gross_hp*3.6)/total_kg_hr:.2f} GJ/t-CO2")
+    print(f"Electric Penalty:       {(hp['W_hp']*3.6)/total_kg_hr:.2f} GJ/t-CO2")
+    print("="*55)
+
+    return {
+        "streams": streams,
+        "intervals": intervals,
+        "cascade": cascade,
+        "base": {
+            "Q_hot": Q_hot_base,
+            "Q_cold": Q_cold_base,
+            "Q_gross": Q_gross_base
+        },
+        "hen": {
+            "Q_hot": Q_hot_hen,
+            "Q_cold": Q_cold_hen,
+            "Q_gross": Q_gross_hen
+        },
+        "hp": {
+            **hp,
+            "Q_gross": Q_gross_hp
+        }
+    }
+
+
+
+#%% Run scenario analysis
+results = scenario_summary()
